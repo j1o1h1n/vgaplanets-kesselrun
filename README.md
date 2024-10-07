@@ -25,20 +25,20 @@ You can set a target for each resource on the planet.  If an assigned ship arriv
 
 I am adding a trade route from P38 -> P29 -> P5.  All trade routes are round trips, on reaching the last planet, a ship will go to the start.  I have selected a ship, S52, and set two waypoints.
 
-[Create A New Trade Route](./images/ss-2.png)
+![Create A New Trade Route](./images/ss-2.png)
 
 Then I click the "Show Trade Routes" button.  This displays a dialog with the current trade routes.
 
-[Show Trade Routes](./images/ss-1.png)
+![Show Trade Routes](./images/ss-1.png)
 
 Here click "ADD ROUTE".  This displays a list of ships, I click S52.
 
-[Create Trade Route From Ship Waypoints](./images/ss-4.png)
+![Create Trade Route From Ship Waypoints](./images/ss-4.png)
 
 View the targets set for the route.
 
-[View Targets For Route](./images/ss-9.png)
+![View Targets For Route](./images/ss-9.png)
 
 Edit the targets for the route.
 
-[Edit Targets For Planet](./images/ss-7.png)
+![Edit Targets For Planet](./images/ss-7.png)
