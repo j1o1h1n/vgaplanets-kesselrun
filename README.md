@@ -1,6 +1,6 @@
 # Kessel Run
 
-Download the [current version]() featuring:
+Install the [current version]([images/ss-5.png](https://raw.githubusercontent.com/j1o1h1n/vgaplanets/refs/heads/main/src/kesselrun.user.js)) featuring:
 
 * Create trade routes and assign them to ships
 * Manage allocation targets on planets
