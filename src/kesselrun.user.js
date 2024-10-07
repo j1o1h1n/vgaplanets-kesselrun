@@ -3,7 +3,7 @@
 // @author      John Lehmann
 // @copyright   John Lehmann, 2024
 // @license     Apache 2.0
-// @downloadURL http://banksia.local/vgaplanets/kesselrun.user.js
+// @downloadURL https://raw.githubusercontent.com/j1o1h1n/vgaplanets/refs/heads/main/src/kesselrun.user.js
 // @description A script for Nu Planets to automate your supply lines
 // @namespace   kesselrun/planets.nu
 // @include     https://planets.nu/*
