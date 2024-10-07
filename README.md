@@ -21,6 +21,12 @@ Click the Run Trade Routes button to activate all trade routes.
 
 You can set a target for each resource on the planet.  If an assigned ship arrives at the planet and the amount of resource available is greater than the target it will load the excess.  If the amount is less than the target and the ship is carrying that cargo, it will unload cargo.
 
+## Run Trade Routes
+
+![Menu Buttons](./images/ss-5.png)
+
+Click the aqua colored "Run Trade Routes" button to activate all trade routes.  Assigned ships will have their next waypoint set, will load fuel and cargo, or set down cargo according to the targets and have their ready tick set.
+
 ### Example
 
 I am adding a trade route from P38 -> P29 -> P5.  All trade routes are round trips, on reaching the last planet, a ship will go to the start.  I have selected a ship, S52, and set two waypoints.
