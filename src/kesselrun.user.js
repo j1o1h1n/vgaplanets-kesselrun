@@ -3,7 +3,7 @@
 // @author      John Lehmann
 // @copyright   John Lehmann, 2024
 // @license     Apache 2.0
-// @downloadURL https://raw.githubusercontent.com/j1o1h1n/vgaplanets/refs/heads/main/src/kesselrun.user.js
+// @downloadURL https://www.helianthi.com/listings/kesselrun.user.js
 // @description A script for Nu Planets to automate your supply lines
 // @namespace   kesselrun/planets.nu
 // @include     https://planets.nu/*
@@ -12,7 +12,7 @@
 // @include     http://*.planets.nu/*
 // @require     https://chmeee.org/ext/planets.nu/McNimblesToolkit-1.2.user.js
 // @require     https://chmeee.org/ext/planets.nu/FleetManagement.user.js
-// @version     1.0
+// @version     1.1
 // @grant       none
 // ==/UserScript==
 
@@ -32,6 +32,8 @@ console.log(name + " v"+version+" planets.nu plugin registered");
 kesselrun.EPSILON = 1e-6;
 kesselrun.MAX_MEGACREDITS = 10000;
 kesselrun.MIN_FUEL = 50;
+kesselrun.READY_COLOR = "fca311";
+kesselrun.NOT_READY_COLOR = "81f7e5";
 
 kesselrun.RESOURCES = [
     "megacredits",
@@ -51,13 +53,21 @@ kesselrun.MINERALS = [
     "molybdenum",
 ];
 
+kesselrun.METALS = [
+    "duranium",
+    "tritanium",
+    "molybdenum",
+];
+
 kesselrun.RouteNameEndings = [
     "Run", "Route", "Trail", "Trek", "Leap", "Voyage", "Passage", "Jump", 
     "Expedition", "Corridor", "Pathway", "Drift", "Circuit", "Loop", 
     "Flight", "Track", "Quest", "Chase", "Cruise", "Odyssey", "Expanse", 
     "Journey", "Traverse", "Line", "Detour", "Shortcut", "Way", "March", "Charge",
-    "Retreat"
 ];
+
+kesselrun.UnitaryRouteNameEndings = ["Stand", "Stop", "Terminus", "Pond",
+    "Pasture", "Paddock", "End", "Retreat", "Farm", "Ranch"];
 
 class TradeRoute {
     constructor(id, route, targets, assignments) {
@@ -72,11 +82,43 @@ class TradeRoute {
 
         // Choose a random ending from the list of options
         const ending = kesselrun.RouteNameEndings[Math.floor(Math.random() * kesselrun.RouteNameEndings.length)];
+        const unitaryEnding = kesselrun.UnitaryRouteNameEndings[Math.floor(Math.random() * kesselrun.UnitaryRouteNameEndings.length)];
 
-        this.name = `${startPlanet} to ${endPlanet} ${ending}`;  // Auto-generated name
+        // Auto-generate the route name
+        this.name = route.length > 1 ? `${startPlanet} to ${endPlanet} ${ending}` : `${startPlanet} ${unitaryEnding}`;
     }
 };
 
+class MinPriorityQueue {
+    constructor() {
+        this.items = [];
+    }
+
+    enqueue(element, priority) {
+        this.items.push({ element, priority });
+        this.items.sort((a, b) => a.priority - b.priority);  // Sort by priority
+    }
+
+    dequeue() {
+        return this.items.shift();  // Remove and return the element with the smallest priority
+    }
+
+    isEmpty() {
+        return this.items.length === 0;
+    }
+};
+
+/**
+ * Return zero bounded minimum.
+ */
+kesselrun.zmin = function (...args) {
+    return Math.max(0, Math.min(...args));
+};
+
+/**
+ * An object with supply and demand tables by planet, for a trade route.
+ * {"supply": {planetId: {rsrc: qty}}, "demand": {planetId: {rsrc: qty}}}
+ */
 class Manifest {
     constructor(supply, demand) {
         this.supply = supply;
@@ -84,11 +126,18 @@ class Manifest {
     }
 };
 
-kesselrun.zmin = function (...args) {
-    return Math.max(0, Math.min(...args));
-};
-
+/**
+ * Builds and returns a Manifest of supply and demand for a trade route.
+ *
+ * @param {Object} tradeRoute - The trade route object containing planet targets.
+ * @returns {Manifest} - A Manifest object with supply and demand tables by planet.
+ *
+ * For single-stop (alchemy) routes, it directly maps available resources to supply and demand.
+ * For multi-stop routes, it calculates supply and demand based on the difference
+ * between available resources and targets.
+ */
 kesselrun.buildManifest = function (tradeRoute) {
+    const onestop = tradeRoute.route.length == 1;
     let supply = {};
     let demand = {};
 
@@ -101,27 +150,88 @@ kesselrun.buildManifest = function (tradeRoute) {
         for (let rsrc in tradeRoute.targets[planetId]) {
             let avail = planet[rsrc];
             let tgt = tradeRoute.targets[planetId][rsrc];
-            supply[planetId][rsrc] = Math.max(0, avail - tgt);
-            demand[planetId][rsrc] = Math.max(0, tgt - avail);
+            if (onestop) {
+                // tweak to cause Merlin & Alchemy to load supplies on a single planet route
+                supply[planetId][rsrc] = avail;
+                demand[planetId][rsrc] = tgt;
+            } else {
+                supply[planetId][rsrc] = Math.max(0, avail - tgt);
+                demand[planetId][rsrc] = Math.max(0, tgt - avail);
+            }
         }
     }
     return new Manifest(supply, demand);
 };
 
-kesselrun.handleUnload = function (ship, planet, demand, supply) {
-    for (let rsrc in supply) {
-        if (ship[rsrc] === 0) continue;
-        let avail = ship[rsrc];
-        if (rsrc === "neutronium") {
-            if (!vgap.gameUsesFuel()) {
-                continue
-            }
-            let hullId = ship.hullid;
-            avail = hullId === 14 ? ship.neutronium : Math.max(ship.neutronium - kesselrun.MIN_FUEL, 0);
+/**
+ * Build a matrix of the transwarp navigable distances between planets in the trade route.
+ */
+kesselrun.buildDistanceMatrix = function(tradeRoute) {
+    const matrix = {};
+
+    // Step 1: Calculate distances between all pairs, excluding pairs with distance > 83
+    for (let i = 0; i < tradeRoute.route.length; i++) {
+        const a = vgap.getPlanet(tradeRoute.route[i]);
+        if (!matrix[a.id]) matrix[a.id] = {};
+
+        for (let j = i + 1; j < tradeRoute.route.length; j++) {
+            const b = vgap.getPlanet(tradeRoute.route[j]);
+            const dist = kesselrun.calcDist(a, b);
+            if (dist > 83) continue;  // Skip overlong distances
+
+            matrix[a.id][b.id] = dist;
+            if (!matrix[b.id]) matrix[b.id] = {};
+            matrix[b.id][a.id] = dist;  // Symmetry
         }
-        let val = Math.min(avail, demand[rsrc]);
-        ship[rsrc] -= val;
-        planet[rsrc] += val;
+    }
+
+    // Step 2: Add/overwrite distances for adjacent pairs (wrap around using modulo)
+    for (let i = 0; i < tradeRoute.route.length; i++) {
+        const a = vgap.getPlanet(tradeRoute.route[i]);
+        const next = (i + 1) % tradeRoute.route.length;
+        const b = vgap.getPlanet(tradeRoute.route[next]);
+        const dist = kesselrun.calcDist(a, b);
+
+        matrix[a.id][b.id] = dist;
+        matrix[b.id][a.id] = dist;  // Symmetry
+    }
+
+    return matrix;
+};
+
+kesselrun.isFullyLoaded = function (ship) {
+    const hull = vgap.getHull(ship.hullid);
+    const loading = vgap.getTotalCargo(ship) / hull.cargo;
+    return loading > 0.95;
+};
+
+kesselrun.handleUnload = function (ship, planet, demand, supply) {
+    if (ship.hullid == 104 && vgap.gameUsesFuel()) {
+        // 104 - refinery - unload all but 1 fuel
+        let val = ship.neutronium - 1;
+        ship.neutronium -= val;
+        planet.neutronium += val;
+    } else if (ship.hullid == 105) {
+        // 105 - merlin - unload all minerals
+        for (let rsrc of kesselrun.METALS) {
+            planet[rsrc] += ship[rsrc];
+            ship[rsrc] = 0;
+        }
+    } else {
+        for (let rsrc in supply) {
+            if (ship[rsrc] === 0) continue;
+            let avail = ship[rsrc];
+            if (rsrc === "neutronium") {
+                if (!vgap.gameUsesFuel()) {
+                    continue
+                }
+                let hullId = ship.hullid;
+                avail = hullId === 14 ? ship.neutronium : Math.max(ship.neutronium - kesselrun.MIN_FUEL, 0);
+            }
+            let val = Math.min(avail, demand[rsrc]);
+            ship[rsrc] -= val;
+            planet[rsrc] += val;
+        }
     }
     return true;
 };
@@ -146,13 +256,19 @@ kesselrun.handleLoadNeutronium = function (ship, planet, supply, fuelSpace, tota
     return true;
 };
 
-
+/**
+ * Loads cargo onto the ship based on available supply, total demand, and ship capacity.
+ *
+ * The function filters available resources, calculates how much of each to load based on
+ * demand and cargo space, and updates the ship, planet, and supply objects accordingly.
+ */
 kesselrun.handleLoadCargo = function (ship, planet, supply, totals, hullCargo) {
-    let totalDemand = kesselrun.CARGO_RESOURCES.reduce((sum, r) => sum + (totals[r] || 0), 0);
+    let resources = kesselrun.CARGO_RESOURCES.filter(r => ((supply[r] || 0) > 0) && ((totals[r] || 0) > 0))
+    let totalDemand = resources.reduce((sum, r) => sum + (totals[r] || 0), 0);
     let weights = {};
     let lots = {};
 
-    kesselrun.CARGO_RESOURCES.forEach(r => {
+    resources.forEach(r => {
         weights[r] = (totals[r] || 0) / (totalDemand + kesselrun.EPSILON);
         lots[r] = Math.trunc(weights[r] * 10);
     });
@@ -164,7 +280,7 @@ kesselrun.handleLoadCargo = function (ship, planet, supply, totals, hullCargo) {
         if (cargoFree === 0 || cargoFree === last) break;
         last = cargoFree;
 
-        kesselrun.CARGO_RESOURCES.forEach(r => {
+        resources.forEach(r => {
             let val = kesselrun.zmin(lots[r], supply[r] || 0, totals[r], cargoFree);
             if (val === 0) return;
             ship[r] += val;
@@ -211,25 +327,18 @@ kesselrun.handleCargoForShip = function (ship, planet, manifest) {
           kesselrun.handleLoadCargo(ship, planet, supply, totals, hullCargo);
 };
 
-kesselrun.calcDist = (planetA, planetB) => {
-    const dx = planetA.x - planetB.x;
-    const dy = planetA.y - planetB.y;
-    return Math.sqrt(dx * dx + dy * dy);
+kesselrun.calcDist = (lhs, rhs) => {
+    return Math.dist(lhs.x, lhs.y, rhs.x, rhs.y);
 };
 
 kesselrun.calcFuel = function (ship, overfill) {
-    let dx = ship.targetx - ship.x;
-    let dy = ship.targety - ship.y;
-
-    if (dx === 0 && dy === 0) return 0;
-
-    let distance = Math.sqrt(dx * dx + dy * dy);
+    let distance = Math.dist(ship.x, ship.y, ship.targetx, ship.targety);
     if (overfill) {
         distance = Math.max(distance, 81)
     }
     let mass = mcntk.totalMass(ship);
     let engine = vgap.getEngine(ship.engineid);
-    return mcntk.fuelForFullDistance(engine, ship.warp, mcntk.isGravitonic(ship), distance, mass);
+    return mcntk.fuelForFullDistance(engine, ship.warp, mcntk.isGravitonic(ship), distance, mass) + 1;
 };
 
 kesselrun.moveToAssigned = function (tradeRoute, ship) {
@@ -248,7 +357,10 @@ kesselrun.moveToAssigned = function (tradeRoute, ship) {
     return true;
 };
 
-kesselrun.setNextDestination = function (tradeRoute, ship) {
+/**
+ * Move to the next planet in the trade route, in the normal order.
+ */
+kesselrun.followTradeRoute = function (tradeRoute, ship) {
     const shipId = ship.id;
     let planet = vgap.planetAt(ship.x, ship.y);
     let step = tradeRoute.assignments[shipId];
@@ -274,6 +386,102 @@ kesselrun.setNextDestination = function (tradeRoute, ship) {
             }
         }
     }
+    return false;
+};
+
+/**
+ * Use Dijkstra search to find the shortest path from startPlanet to targetPlanet
+ * and return the next destination, given startPlanet as the starting point.
+ */
+kesselrun.search = function (graph, startPlanet, targetPlanet) {
+    let backtrack = {};
+    let distances = {};
+
+    // Initialize distances to infinity for all nodes
+    for (const node in graph) {
+        distances[node] = Infinity;
+    }
+    distances[startPlanet] = 0;
+
+    // Priority queue of unvisited nodes
+    let unvisited = new MinPriorityQueue();
+    unvisited.enqueue(startPlanet, 0);
+
+    while (!unvisited.isEmpty()) {
+        let { element: currentNode, priority: currentDistance } = unvisited.dequeue();
+
+        if (currentDistance > distances[currentNode]) {
+            continue;
+        }
+
+        // Explore neighbors
+        for (const [neighbor, weight] of Object.entries(graph[currentNode])) {
+            let distance = currentDistance + weight;
+            if (distance < distances[neighbor]) {
+                distances[neighbor] = distance;
+                unvisited.enqueue(neighbor, distance);
+                backtrack[neighbor] = currentNode;
+            }
+        }
+    }
+
+    // Reconstruct the path from targetPlanet back to startPlanet using the backtrack map
+    let nextPlanet = targetPlanet;
+    while (backtrack[nextPlanet] !== startPlanet) {
+        nextPlanet = backtrack[nextPlanet];
+    }
+
+    // return the next stop
+    return nextPlanet;
+}
+
+/**
+ * Move by the shortest path to the next planet where there is demand for what the
+ * ship is carrying.
+ */
+kesselrun.followDemand = function (tradeRoute, manifest, currentPlanet, ship) {
+    // find nearest planet with demand for the ship cargo
+    let targetPlanet = null;
+    let minDistance = Infinity;
+    for (const planetId in manifest.demand) {
+        if (planetId == currentPlanet.id) continue;  // Skip the current planet
+
+        const planetDemand = manifest.demand[planetId];
+        let hasDemand = kesselrun.CARGO_RESOURCES.some(resource =>
+            planetDemand[resource] > 0 && ship[resource] > 0
+        );
+
+        if (!hasDemand) {
+            continue;
+        }
+
+        const planet = vgap.getPlanet(planetId);
+        const distance = kesselrun.calcDist(currentPlanet, planet);
+        if (distance < minDistance) {
+            minDistance = distance;
+            targetPlanet = planet;
+        }
+    }
+    if (!targetPlanet) {
+        return false;
+    }
+
+    // find the shortest path to the targetPlanet
+    let graph = kesselrun.buildDistanceMatrix(tradeRoute);
+    let nextPlanetId = kesselrun.search(graph, currentPlanet.id, targetPlanet.id);
+
+    console.log("followDemand: ship " + ship.id + " is fully loaded will move to " + targetPlanet.id + " via " + nextPlanetId)
+
+    // update the assignment to the next planet on the path and moveToAssigned
+    let step = tradeRoute.assignments[ship.id];
+    for (let i = 0; i < tradeRoute.route.length; i++) {
+        step = (step + 1) % tradeRoute.route.length;
+        if (tradeRoute.route[step] === nextPlanetId) {
+            tradeRoute.assignments[ship.id] = step;
+            return kesselrun.moveToAssigned(tradeRoute, ship);
+        }
+    }
+
     return false;
 };
 
@@ -318,25 +526,52 @@ kesselrun.handleRoute = function (tradeRoute) {
         if (!ship) continue;
 
         const planet = vgap.planetAt(ship.x, ship.y);
-        if (!planet || tradeRoute.route.indexOf(planet.id) == -1 || ship.ownerid !== planet.ownerid) {
+        if (!planet || !tradeRoute.route.includes(planet.id) || ship.ownerid !== planet.ownerid) {
             continue;
         }
 
         const manifest = kesselrun.buildManifest(tradeRoute);
 
-        kesselrun.updateIdle(
-            ship,
-            kesselrun.handleCargoForShip(ship, planet, manifest) &&
-            kesselrun.setNextDestination(tradeRoute, ship) &&
-            kesselrun.refuel(ship)
-        );
+        // single-stop route - no need to move
+        if (tradeRoute.route.length == 1) {
+            kesselrun.updateIdle(ship, kesselrun.handleCargoForShip(ship, planet, manifest));
+            continue;
+        }
+
+        // Load cargo, then if fully loaded, head to the next planet with demand for the ship's cargo.
+        // Otherwise, follow the next step on the trade route.
+        let ready = kesselrun.handleCargoForShip(ship, planet, manifest)
+                    && ((kesselrun.isFullyLoaded(ship) && kesselrun.followDemand(tradeRoute, manifest, planet, ship))
+                         || kesselrun.followTradeRoute(tradeRoute, ship))
+                    && kesselrun.refuel(ship);
+
+        // Update idle status based on readiness.
+        kesselrun.updateIdle(ship, ready);
     }
+};
+
+
+kesselrun.updateShipNotes = function (ready) {
+    let routes = kesselrun.getTradeRoutes();
+    routes.forEach(route => {
+        Object.keys(route.assignments).forEach(shipId => {
+            let note = vgap.getShipNote(shipId);
+            note.body = "TR" + route.id;
+            note.color = ready ? kesselrun.READY_COLOR : kesselrun.NOT_READY_COLOR;;
+            note.changed = 1;
+        });
+    });
 };
 
 kesselrun.run = function () {
     const tradeRoutes = kesselrun.getTradeRoutes()
     tradeRoutes.forEach(route => kesselrun.handleRoute(route));
+    kesselrun.updateShipNotes(true)
 };
+
+kesselrun.processload = function() {
+    kesselrun.updateShipNotes(false);
+}
 
 kesselrun.planetNear = function (cluster, x, y) {
     return cluster.findNearestSphereObjects(x, y, 4)[0]
@@ -351,6 +586,11 @@ kesselrun.getTradeRoutes = function() {
     // Return the tradeRoutes array
     return kesselrun.settings.tradeRoutes();
 };
+
+kesselrun.getTradeRoute = function(routeId) {
+    const tradeRoutes = kesselrun.getTradeRoutes();
+    return tradeRoutes.find(tr => tr.id === routeId);
+}
 
 kesselrun.saveTradeRoutes = function(tradeRoutes) {
     kesselrun.settings.setTradeRoutes(tradeRoutes);
@@ -391,11 +631,12 @@ kesselrun.buildTradeRoute = function (ship) {
 
     // Get the target planet based on the ship's destination coordinates
     planet = kesselrun.planetNear(cluster, ship.targetx, ship.targety);
-    if (!planet) {
+    if (planet && (planet.id != origin)) {
+        route.push(planet.id);
+    } else if ((ship.hullid != 104) && (ship.hullid != 105)) {
         console.warn("No planet at the first ship destination");
         return;
     }
-    route.push(planet.id);
 
     // Process additional waypoints and add them to the route
     ship.waypoints.forEach(wp => {
@@ -415,6 +656,9 @@ kesselrun.buildTradeRoute = function (ship) {
             targets[planetId][rsrc] = (planetId === origin) ? 10000 : 0;
         });
     });
+    if ((route.length == 1) && ((ship.hullid == 104) || (ship.hullid == 105))) {
+        targets[origin]["supplies"] = 0;
+    }
 
     // Create the initial assignments map for the ship
     const assignments = {};
@@ -428,6 +672,15 @@ kesselrun.deleteTradeRoute = function(routeId) {
     // Retrieve the current trade routes
     const tradeRoutes = kesselrun.getTradeRoutes();
 
+    // Remove ship notes
+    const deletedRoute = kesselrun.getTradeRoute(routeId);
+    Object.keys(deletedRoute.assignments).forEach(shipId => {
+        const note = vgap.getShipNote(shipId);
+        note.body = "";
+        note.color = "";
+        note.changed = 1;
+    });
+
     // Filter out the trade route with the specified ID
     const updatedRoutes = tradeRoutes.filter(tr => tr.id !== routeId);
 
@@ -435,53 +688,6 @@ kesselrun.deleteTradeRoute = function(routeId) {
     kesselrun.saveTradeRoutes(updatedRoutes);
 
     return updatedRoutes;
-};
-
-kesselrun.copyTradeRoute = function(routeId) {
-    // Retrieve the current trade routes
-    const tradeRoutes = kesselrun.getTradeRoutes();
-
-    // Find the trade route to copy
-    const originalRoute = tradeRoutes.find(tr => tr.id === routeId);
-    if (!originalRoute) {
-        console.error(`Trade Route with ID ${routeId} not found!`);
-        return null;
-    }
-
-    // Determine the highest existing ID and add 1
-    const maxId = Math.max(...tradeRoutes.map(tr => tr.id));
-    const newId = maxId + 1;
-
-    // Create a copy of the original trade route with a new ID
-    return kesselrun.createTradeRoute(
-        [...originalRoute.route],                   // Clone the route array
-        JSON.parse(JSON.stringify(originalRoute.targets)),  // Deep clone targets
-        {}                                         // New assignments on the copied route
-    )
-};
-
-kesselrun.reverseTradeRoute = function(routeId) {
-    // Retrieve the current trade routes
-    const tradeRoutes = kesselrun.getTradeRoutes();
-
-    // Find the trade route to reverse
-    const routeToReverse = tradeRoutes.find(tr => tr.id === routeId);
-    if (!routeToReverse) {
-        console.error(`Trade Route with ID ${routeId} not found!`);
-        return null;
-    }
-
-    // Reverse the route array
-    const reversedRoute = [...routeToReverse.route].reverse();
-
-    // Create a new reversed trade route using the existing createTradeRoute function
-    const reversedTradeRoute = kesselrun.createTradeRoute(
-        reversedRoute,             // Reversed route
-        routeToReverse.targets,    // Keep the targets unchanged
-        {}                         // Empty assignments
-    );
-
-    return reversedTradeRoute;
 };
 
 kesselrun.updateTradeRouteName = function(routeId, newName) {
@@ -585,6 +791,11 @@ kesselrun.addShipToRoute = function(routeId, shipId) {
         }
     });    
 
+    const note = vgap.getShipNote(shipId);
+    note.body = "TR" + routeId;
+    note.color = kesselrun.NOT_READY_COLOR;
+    note.changed = 1;
+
     // Find the nearest planet on the route to assign the ship
     let nearestPlanetId = null;
     let shortestDistance = Number.MAX_VALUE;
@@ -639,6 +850,10 @@ kesselrun.removeShip = function(routeId, shipId) {
 
     // Remove the ship from the assignments
     delete routeToUpdate.assignments[shipId];
+    const note = vgap.getShipNote(shipId);
+    note.body = "";
+    note.color = "";
+    note.changed = 1;
 
     // Save the updated trade routes back to the settings
     kesselrun.saveTradeRoutes(tradeRoutes);
@@ -744,13 +959,20 @@ kesselrun.detail = function(object, resource) {
     return a + b + c;
 }
 
-kesselrun.availableTargets = function(object, resource) {
+/**
+ * Show the amount available over target, bounded by demand. This is used to show
+ * the balance between what is waiting for pickup and due to arrive at destinations
+ * in the Trade Routes dialogue.
+ */
+kesselrun.availableTargets = function(tradeRoute, resource) {
+    let mf = kesselrun.buildManifest(tradeRoute);
+    let demand = Object.values(mf.demand).reduce((total, planet) => total + (planet[resource] || 0), 0);
     let total = 0;
-    for (const planetId in object.targets) {
+    for (const planetId in tradeRoute.targets) {
         const planet = vgap.getPlanet(planetId);
-        if (planet && typeof object.targets[planetId][resource] !== 'undefined') {
-            // Calculate the difference as `planet[resource] - object.targets[planetId][resource]`
-            total += Math.max(0, planet[resource] - (object.targets[planetId][resource] || 0));
+        if (planet && typeof tradeRoute.targets[planetId][resource] !== 'undefined') {
+            let avail = planet[resource] - (tradeRoute.targets[planetId][resource] || 0);
+            total += Math.min(demand, Math.max(0, avail));
         }
     }
     return total;
@@ -810,7 +1032,7 @@ kesselrun.production = function(object, resource) {
 kesselrun.modeDefinitions = {
     "summary": {fun: kesselrun.summary,
                 buttons: ["Add Route"],
-                help: "Available over target / In transit in ships"},
+                help: "Available for transport / In transit in ships"},
     "planets": {fun: kesselrun.detail,
                 buttons: ["Ships", "Add Ship", "Add Planet", "\u23CE"],
                 help: "Showing Target and Available/Ground/(Production)"},
@@ -819,7 +1041,10 @@ kesselrun.modeDefinitions = {
                 help: "Select planet to add to trade route"},
     "targets": {fun: kesselrun.detail,
                 buttons: ["\u23CE"],
-                help: "Edit planet targets"},
+                help: "Set the amount of the resource you want delivered to the planet"},
+    "onestop": {fun: kesselrun.detail,
+                buttons: ["\u23CE"],
+                help: "Set the amount of each resource to be loaded into the orbiting ship"},
 
 };
 
@@ -830,7 +1055,8 @@ kesselrun.showPlanetTargetsDialog = function (planet) {
     const parent = [tradeRoute, planet]
     const targets = kesselrun.RESOURCES;
     const cols = kesselrun.dialog.tgtColumns
-    kesselrun.createDialog("targets", [tradeRoute, planet], targets, cols, null,
+    const mode = tradeRoute.route.length > 1 ? "targets" : "onestop";
+    kesselrun.createDialog(mode, [tradeRoute, planet], targets, cols, null,
                            "[P"+ planet.id + "] " + planet.name + " Targets");
 };
 
@@ -854,7 +1080,7 @@ kesselrun.showTradeRoutes = function () {
 kesselrun.dialog.popDialog = function () {
     if (kesselrun.dialog.mode === "planets") {
         kesselrun.showTradeRoutes();
-    } else if (kesselrun.dialog.mode === "targets") {
+    } else if (kesselrun.dialog.mode === "targets" || kesselrun.dialog.mode === "onestop") {
         const parent = kesselrun.dialog.parent;
         const tradeRoute = parent[0];
         kesselrun.showTradeRouteDetail(tradeRoute);
@@ -968,7 +1194,7 @@ kesselrun.addRoute = function () {
         kesselrun.buildTradeRoute(ship);
         kesselrun.updateTable();
     }
-    var ships = vgap.myships.filter(ship => !(ship.x === ship.targetx && ship.y === ship.targety));
+    var ships = vgap.myships.filter(ship => !(ship.x === ship.targetx && ship.y === ship.targety) || ship.hullid == 104 || ship.hullid == 105);
 
     fleet.createDialog(null, ships, fleet.allColumns, shipSelectedFunc, "Create Trade Route From Ship Waypoints")
 }
@@ -1086,8 +1312,10 @@ kesselrun.dialog.ships = function(object) {
 
 kesselrun.dialog.dist = function(object) {
     warpFun = function(d) {
+        // allow for warpwells
+        d = Math.max(0, d - 2);
         let w = Math.ceil(Math.sqrt(d));
-        return (w<=9) ? w : "!"
+        return (w<=9) ? w : "!";
     }
 
     if (object.route) {

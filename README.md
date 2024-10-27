@@ -48,3 +48,11 @@ View the targets set for the route.
 Edit the targets for the route.
 
 ![Edit Targets For Planet](./images/ss-7.png)
+
+## Trade Route Notes
+
+Ships on a trade route are given a note like "TR1" with the id of the trade route that they are on.  This note colour is initially cyan.  When you run the trade route it changes to gold.
+
+This gives you visual feedback on the map showing that the routes have been run.
+
+![Trade Route Notes](./images/ss-10.png)
