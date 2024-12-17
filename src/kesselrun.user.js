@@ -12,7 +12,7 @@
 // @include     http://*.planets.nu/*
 // @require     https://chmeee.org/ext/planets.nu/McNimblesToolkit-1.2.user.js
 // @require     https://chmeee.org/ext/planets.nu/FleetManagement.user.js
-// @version     1.1
+// @version     1.2
 // @grant       none
 // ==/UserScript==
 
@@ -35,16 +35,20 @@ kesselrun.MIN_FUEL = 50;
 kesselrun.READY_COLOR = "fca311";
 kesselrun.NOT_READY_COLOR = "81f7e5";
 
+kesselrun.pri_colors = ["#C75226", "#2639C7", "#268EC7", "#C7203C", "#8F65A3"];
+kesselrun.sec_colors = ["#CA8569", "#3C4272", "#3C5F72", "#BD5264", "#8F65A3"];
+
 kesselrun.RESOURCES = [
     "megacredits",
     "neutronium",
     "supplies",
+    "clans",
     "duranium",
     "tritanium",
     "molybdenum",
 ];
 
-kesselrun.CARGO_RESOURCES = kesselrun.RESOURCES.slice(-4);
+kesselrun.CARGO_RESOURCES = kesselrun.RESOURCES.slice(-5);
 
 kesselrun.MINERALS = [
     "neutronium",
@@ -133,7 +137,7 @@ class Manifest {
  * @returns {Manifest} - A Manifest object with supply and demand tables by planet.
  *
  * For single-stop (alchemy) routes, it directly maps available resources to supply and demand.
- * For multi-stop routes, it calculates supply and demand based on the difference
+ * For multi-stop routes, it calculates supply and demand based on the difference 
  * between available resources and targets.
  */
 kesselrun.buildManifest = function (tradeRoute) {
@@ -173,12 +177,12 @@ kesselrun.buildDistanceMatrix = function(tradeRoute) {
     for (let i = 0; i < tradeRoute.route.length; i++) {
         const a = vgap.getPlanet(tradeRoute.route[i]);
         if (!matrix[a.id]) matrix[a.id] = {};
-
+        
         for (let j = i + 1; j < tradeRoute.route.length; j++) {
             const b = vgap.getPlanet(tradeRoute.route[j]);
             const dist = kesselrun.calcDist(a, b);
             if (dist > 83) continue;  // Skip overlong distances
-
+            
             matrix[a.id][b.id] = dist;
             if (!matrix[b.id]) matrix[b.id] = {};
             matrix[b.id][a.id] = dist;  // Symmetry
@@ -215,7 +219,7 @@ kesselrun.handleUnload = function (ship, planet, demand, supply) {
         // 105 - merlin - unload all minerals
         for (let rsrc of kesselrun.METALS) {
             planet[rsrc] += ship[rsrc];
-            ship[rsrc] = 0;
+            ship[rsrc] = 0;            
         }
     } else {
         for (let rsrc in supply) {
@@ -353,7 +357,7 @@ kesselrun.moveToAssigned = function (tradeRoute, ship) {
 
     ship.targetx = assigned.x;
     ship.targety = assigned.y;
-    ship.warp = mcntk.maxWarp(ship);
+    ship.warp = Math.min(mcntk.maxWarp(ship), ship.engineid);
     return true;
 };
 
@@ -396,7 +400,7 @@ kesselrun.followTradeRoute = function (tradeRoute, ship) {
 kesselrun.search = function (graph, startPlanet, targetPlanet) {
     let backtrack = {};
     let distances = {};
-
+    
     // Initialize distances to infinity for all nodes
     for (const node in graph) {
         distances[node] = Infinity;
@@ -416,7 +420,7 @@ kesselrun.search = function (graph, startPlanet, targetPlanet) {
 
         // Explore neighbors
         for (const [neighbor, weight] of Object.entries(graph[currentNode])) {
-            let distance = currentDistance + weight;
+            let distance = currentDistance + weight;    
             if (distance < distances[neighbor]) {
                 distances[neighbor] = distance;
                 unvisited.enqueue(neighbor, distance);
@@ -447,7 +451,7 @@ kesselrun.followDemand = function (tradeRoute, manifest, currentPlanet, ship) {
         if (planetId == currentPlanet.id) continue;  // Skip the current planet
 
         const planetDemand = manifest.demand[planetId];
-        let hasDemand = kesselrun.CARGO_RESOURCES.some(resource =>
+        let hasDemand = kesselrun.CARGO_RESOURCES.some(resource => 
             planetDemand[resource] > 0 && ship[resource] > 0
         );
 
@@ -556,20 +560,93 @@ kesselrun.updateShipNotes = function (ready) {
     routes.forEach(route => {
         Object.keys(route.assignments).forEach(shipId => {
             let note = vgap.getShipNote(shipId);
+            let colors = kesselrun.pri_colors;
+            let color = !ready ? colors[route.id % colors.length].substring(1) : kesselrun.READY_COLOR;
+
             note.body = "TR" + route.id;
-            note.color = ready ? kesselrun.READY_COLOR : kesselrun.NOT_READY_COLOR;;
+            note.color = color;
             note.changed = 1;
         });
     });
 };
 
+kesselrun.drawTradeRoutes = function (tradeRoutes) {
+    const zmin = 1;
+    const zmax = 30;
+    const overlays = vgap.map.drawingtool.overlays;
+    const layer = {
+        "active": true,
+        "name": "Trade Routes",
+        "markups": []
+    };
+    let count = 0;
+
+    for (let tradeRoute of tradeRoutes) {
+        if (tradeRoute.route.length == 1) {
+            continue;
+        }
+        for (let offset of [0, 1]) {
+            let colors = offset == 0 ? kesselrun.pri_colors : kesselrun.sec_colors;
+            let color = colors[tradeRoute.id % colors.length];
+            let markup = {"type": "line", "points": [], "attr": {"stroke": color, "color": color, "zmin": zmin, "zmax": zmax}};
+            for (let step = 0; step <= tradeRoute.route.length; step++) {
+                let planet = vgap.getPlanet(tradeRoute.route[step % tradeRoute.route.length]);
+                markup.points.push({'x': planet.x + offset, 'y': planet.y + offset})
+            }
+            layer.markups.push(markup);
+        }
+        count++;
+    }
+
+    if (count == 0) {
+        return;
+    }
+
+    // save to map
+    if (overlays.length == 0) {
+        overlays.push(layer);
+    } else {
+        let layerIndex = overlays.findIndex(entry => entry.name === layer.name);
+        if (layerIndex !== -1) {
+            console.log("Updating existing");
+            overlays[layerIndex] = layer;
+        } else {
+            console.log("Adding new");
+            overlays.push(layer);
+            layerIndex = overlays.length - 1;
+        }
+    }
+    vgap.map.drawingtool.current = {"overlay": layer, "markup": null, "editindex": null, "addType": "line"}
+    vgap.map.draw();
+
+    // save as note
+    const note = vgap.getNote(0, -133919);
+    // FIXME fails on no notes
+    let body = [];
+    if (note['body']) {
+        body = JSON.parse(note['body']);
+        layerIndex = body.findIndex(entry => entry.name === layer.name);
+        if (layerIndex !== -1) {
+            body[layerIndex] = layer;
+        } else {
+            body.push(layer);
+        }
+    } else {
+        body.push(layer);
+    }
+    note['body'] = JSON.stringify(body);
+    note["changed"] = 1;    
+}
+
 kesselrun.run = function () {
     const tradeRoutes = kesselrun.getTradeRoutes()
     tradeRoutes.forEach(route => kesselrun.handleRoute(route));
     kesselrun.updateShipNotes(true)
+    vgap.map.draw();
 };
 
 kesselrun.processload = function() {
+    kesselrun.checkDestroyed();
     kesselrun.updateShipNotes(false);
 }
 
@@ -593,6 +670,7 @@ kesselrun.getTradeRoute = function(routeId) {
 }
 
 kesselrun.saveTradeRoutes = function(tradeRoutes) {
+    kesselrun.drawTradeRoutes(tradeRoutes);
     kesselrun.settings.setTradeRoutes(tradeRoutes);
 };
 
@@ -793,7 +871,7 @@ kesselrun.addShipToRoute = function(routeId, shipId) {
 
     const note = vgap.getShipNote(shipId);
     note.body = "TR" + routeId;
-    note.color = kesselrun.NOT_READY_COLOR;
+    note.color = kesselrun.sec_colors[routeId % kesselrun.sec_colors.length].substring(1);
     note.changed = 1;
 
     // Find the nearest planet on the route to assign the ship
@@ -861,6 +939,7 @@ kesselrun.removeShip = function(routeId, shipId) {
     return true;
 };
 
+/** Move a planet up or down in the route */
 kesselrun.movePlanet = function(routeId, index, direction) {
     // Retrieve the current trade routes
     const tradeRoutes = kesselrun.getTradeRoutes();
@@ -927,7 +1006,22 @@ kesselrun.removePlanet = function(routeId, index) {
     return true;
 };
 
-// dialogue functions
+/** Check routes for ships that no longer exist. */
+kesselrun.checkDestroyed = function() {
+    let tradeRoutes = kesselrun.getTradeRoutes();
+    tradeRoutes.forEach(route => {
+        Object.keys(route.assignments).forEach(shipId => {
+            let ship = vgap.getShip(shipId);
+            if (!ship || ship.ownerid != vgap.player.id) {
+                console.log(`Removing ship ${shipId} from route ${route.id} as it no longer exists`);
+                delete route.assignments[shipId];
+            }
+        });
+    });
+    kesselrun.saveTradeRoutes(tradeRoutes);
+};
+
+// dialog functions
 
 kesselrun.dialog = {};  // the dialog attributes
 
@@ -935,8 +1029,8 @@ kesselrun.dialog.key = "KR: Dialog";
 
 kesselrun.dialog.allColumns = [
     "ID", "Name", "Pl", "Sh", "Dist",
-    "Tgt$", "TgtS", "TgtN", "TgtD", "TgtT", "TgtM",
-    "$", "S", "N", "D", "T", "M", "*"
+    "Tgt$", "TgtS", "TgtC", "TgtN", "TgtD", "TgtT", "TgtM",
+    "$", "S", "C", "N", "D", "T", "M", "*"
 ];
 
 kesselrun.dialog.tgtColumns = ["Resource", "Supply", "Target", "Edit"];
@@ -1298,8 +1392,17 @@ kesselrun.dialog.id = function(object) {
     return object.id;
 };
 
+kesselrun.escapeHtml = function(input) {
+    return input
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+};
+
 kesselrun.dialog.name = function(object) {
-    return object.name;
+    return kesselrun.escapeHtml(object.name);
 };
 
 kesselrun.dialog.planets = function(object) {
@@ -1356,6 +1459,10 @@ kesselrun.dialog.tgtSupplies = function(object) {
     return kesselrun.target(object, "supplies");
 };
 
+kesselrun.dialog.tgtClans = function(object) {
+    return kesselrun.target(object, "clans");
+};
+
 kesselrun.dialog.tgtTritanium = function(object) {
     return kesselrun.target(object, "tritanium");
 };
@@ -1378,6 +1485,10 @@ kesselrun.dialog.neutronium = function(object) {
 
 kesselrun.dialog.supplies = function(object) {
     return kesselrun.dialog.modeFun(object, "supplies");
+};
+
+kesselrun.dialog.clans = function(object) {
+    return kesselrun.dialog.modeFun(object, "clans");
 };
 
 kesselrun.dialog.tritanium = function(object) {
@@ -1517,12 +1628,14 @@ kesselrun.columnDefinitions = {
     "Dist": { fun: kesselrun.dialog.dist, tt: "Distance to next planet (Warp)" },
     "Tgt$": { fun: kesselrun.dialog.tgtMegacredits, tt: "Target Megacredits" },
     "TgtS": { fun: kesselrun.dialog.tgtSupplies, tt: "Target Supplies" },
+    "TgtC": { fun: kesselrun.dialog.tgtClans, tt: "Target Clans" },
     "TgtN": { fun: kesselrun.dialog.tgtNeutronium, tt: "Target Neutronium" },
     "TgtD": { fun: kesselrun.dialog.tgtDuranium, tt: "Target Duranium" },
     "TgtT": { fun: kesselrun.dialog.tgtTritanium, tt: "Target Tritanium" },
     "TgtM": { fun: kesselrun.dialog.tgtMolybdenum, tt: "Target Molybdenum" },
     "$": { fun: kesselrun.dialog.megacredits, tt: "Megacredits" },
     "S": { fun: kesselrun.dialog.supplies, tt: "Supplies" },
+    "C": { fun: kesselrun.dialog.supplies, tt: "Clans" },
     "N": { fun: kesselrun.dialog.neutronium, tt: "Neutronium" },
     "D": { fun: kesselrun.dialog.duranium, tt: "Duranium" },
     "T": { fun: kesselrun.dialog.tritanium, tt: "Tritanium" },
