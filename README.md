@@ -1,5 +1,7 @@
 # Kessel Run
 
+This is a JavaScript plugin for [VGAPlanets Nu](https://planets.nu/).  It helps you by automating freighter movement, picking up and delivering cargo.
+
 Install the [current version](https://www.helianthi.com/listings/kesselrun.user.js) featuring:
 
 * Create trade routes and assign them to ships
